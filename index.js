@@ -2,11 +2,12 @@ const path = require("path");
 const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
-const { init: initDB, Counter } = require("./db");
+const { init: initDB, Counter, User } = require("./db");
 
 const logger = morgan("tiny");
-
 const app = express();
+const WX_APPID = process.env.WX_APPID;
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 app.use(cors());
@@ -42,10 +43,38 @@ app.get("/api/count", async (req, res) => {
   });
 });
 
-// 小程序调用，获取微信 Open ID
-app.get("/api/wx_openid", async (req, res) => {
-  if (req.headers["x-wx-source"]) {
-    res.send(req.headers["x-wx-openid"]);
+// 小程序登录：云托管会注入微信身份请求头
+app.get("/api/auth/me", async (req, res) => {
+  try {
+    if (!WX_APPID) {
+      console.error("缺少 WX_APPID 环境变量");
+      return res.status(500).json({ message: "服务配置不完整" });
+    }
+
+    const source = req.headers["x-wx-source"];
+    const openid = req.headers["x-wx-openid"];
+    const appid = req.headers["x-wx-appid"];
+
+    if (!source || !openid || appid !== WX_APPID) {
+      return res.status(401).json({ message: "未识别到微信身份" });
+    }
+
+    const [user] = await User.findOrCreate({
+      where: { appid, openid },
+      defaults: { appid, openid, lastSeenAt: new Date() },
+    });
+
+    await user.update({ lastSeenAt: new Date() });
+
+    return res.json({
+      loggedIn: true,
+      user: {
+        createdAt: user.createdAt.toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("微信身份处理失败", error.message);
+    return res.status(500).json({ message: "登录服务暂时不可用" });
   }
 });
 
@@ -58,4 +87,7 @@ async function bootstrap() {
   });
 }
 
-bootstrap();
+bootstrap().catch((error) => {
+  console.error("服务启动失败", error.message);
+  process.exitCode = 1;
+});
